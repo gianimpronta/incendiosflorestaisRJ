@@ -1,0 +1,287 @@
+---
+title: "Análise Preditiva de Incêndios Florestais no Estado do RJ"
+output:
+  html_document:
+    df_print: paged
+---
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(cache = TRUE)
+knitr::opts_chunk$set(comment = ">")
+
+```
+
+Carregando Bibliotecas:
+
+```{r bibliotecas, message=FALSE}
+library(tidyverse)
+library(reshape2)
+library(ggplot2)
+library(mice)
+library(data.table)
+library(ggmap)
+```
+
+
+# __Objetivos__
+
+Está analise consiste na utilização de observações de queimadas e incêndios florestais feitas pelo INPE 
+(Instituto Nacional de Pesquisas Espaciais) em conjunto com observações de estações meteorológicas convencionais do INMET( Instituto Nacional de Meteorologia) na tentativa de obter correlações entre as queimadas e incêndios florestais e as condições meteorológicas de forma a predizer quando ocorrerá um evento.
+
+
+# __Base de dados__
+## __Conjunto de dados: Focos__
+
+Foi utilizada um série temporal extraída do Banco de Dados de queimadas do INPE (<https://prodwww-queimadas.dgi.inpe.br/bdqueimadas>) no formato CSV contendo dados do dia 01/01/2010 até 31/12/2016 com as seguintes colunas:
+
+- DataHora - Data e hora da detecção do foco
+- Satelite - Nome do satélite de referência
+- Pais - País da detecção
+- Estado - estado da detecção
+- Municipi - município da detecção
+- Bioma - bioma da detecção
+- DiaSemCh - A quantos dias a referida área está sem chuvas
+- Precipit - Precipitação no momento da detecção
+- RiscoFog - Risco de Fogo calculado para a área
+- Latitude - Latitude do foco
+- Longitud - Longitude do foco
+- AreaIndu - Determina se a área do foco é industrial
+- FRP - Potência Radiativa do Fogo
+
+O Dataset possui alguns focos duplicados, o que se deve ao fato de vários satélites detectarem o mesmo foco de queimada.
+Dimensões do conjunto de dados - 8.618.991 linhas e 13 colunas
+
+```{r sumario focos}
+load(file = "./dados/focos(bruto).RData")
+summary(focos)    
+```
+
+## __Conjunto de dados: Meteorologia__
+
+Foram utilizados dados de estações meteorológicas convencionais obtidos através do Banco de Dados Meteorológicos para Ensino e Pesquisa (<http://www.inmet.gov.br/projetos/rede/pesquisa/>) contendo uma série temporal do dia 01/01/2010 ao dia 31/12/2016.
+
+- Estacao – Código da estação convencional
+- Data – Data da medição
+- Hora – Hora da medição
+- TempBulboSeco – temperatura medida com termômetro de bulbo seco
+- TempBulboUmido – temperatura medida com termômetro de bulbo úmido
+- UmidadeRelativa – umidade relativa do ar
+- PressaoAtmEstacao – pressão atmosférica no nível da estação
+- VelocidadeVento – velocidade do vento no momento da medição
+- Nebulosidade – nebulosidade no momento da medição
+- Latitude – Latitude da estação
+- Longitude – Longitude da estação
+
+Dimensões do conjunto de dados – 1.781.719 linhas e 11 colunas
+
+```{r sumario meteo}
+load(file = "./dados/meteo(bruto).RData")
+summary(meteo)
+```
+
+# __Pré-processamento__
+## Seleção dos dados
+
+O conjunto de dados Focos não utilizará as colunas “AreaIndu” e “FRP” pois as mesmas estão vazias e não utilizará também a coluna “Pais” já todos os dados se referem apenas ao Brasil.
+
+O dois conjuntos serão filtrados para conterem somente os dados referentes ao estado do Rio de Janeiro. O conjunto focos será filtrado pela coluna Estado, a qual poderá ser removida justamente pois se tornará redundante. O conjunto meteo será filtrado através das estações 83738, 83049, 83743, 83718, 83698 e 83695 localizadas respectivamente em Resende, Paty do Alferes, Rio de janeiro, Cordeiro, Campos dos Goytacazes e Itaperuna, a localização das estações foi obtida através do site do INMET. 
+
+```{r filtragem focos}
+focos_rj <- focos %>%
+    filter(Estado == "Rio de Janeiro") %>%
+    select(-Estado)
+
+100-(dim(focos_rj)[1]/dim(focos)[1]*100)
+
+```
+
+A primeira filtragem do conjunto focos reduziu o número de observações de 8.618.991 para apenas 23.224, uma redução de 99.73% do dataset.
+
+```{r filtragem meteo}
+meteo_rj <- meteo %>%
+    filter(Estacao == 83049 | Estacao == 83738 | Estacao ==  83743 | 
+               Estacao == 83718 | Estacao == 83698 | Estacao == 83695) %>%
+    mutate(mes = format(.[["Data"]], "%m"), ano = format(.[["Data"]], "%Y"))
+100-(dim(meteo_rj)[1]/dim(meteo)[1]*100)
+```
+
+A primeira filtragem do conjunto meteo reduziu o número de observações de 1.781.719 para apenas 42.546, uma redução de 97.61% do dataset, além disso foram acrescentadas duas colunas, "mes" e "ano".
+
+## Qualidade e Limpeza dos dados
+
+### Limpeza do conjunto de dados Meteo
+#### Verificando as observações faltantes
+```{r verificando NA meteo}
+sapply(meteo_rj, function(x)(sum(is.na(x))))
+```
+
+#### Checando a frequência das estações por ano
+```{r frequencia estacos ano}
+freq_table <- xtabs(~ano+Estacao, data=meteo_rj) %>% 
+      t(.)
+freq_table <- reshape(as.data.frame(freq_table), timevar = "ano", idvar = "Estacao", direction = "wide")
+head(freq_table[which(freq_table == 0, arr.ind = TRUE)[,1],])
+```
+
+Todas as estações tem dados para todos os anos.
+
+#### Distribuição de Valores faltantes por ano
+```{r distribuição valores faltantes por ano}
+aggregate(. ~ ano, data=meteo_rj, function(x) {sum(is.na(x))}, na.action = NULL) %>%
+      melt() %>% 
+      filter (value > 0) %>%
+      ggplot(data = . , aes(variable, value, fill = variable)) + 
+      geom_bar(stat = "identity") + facet_grid(ano ~ .) + 
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+#### Distribuição de valores faltantes por estação
+```{r valores faltantes por estação, options}
+meteo_rj$Estacao <- as.factor(meteo_rj$Estacao)
+aggregate(. ~ Estacao, data=meteo_rj, function(x) {sum(is.na(x))}, na.action = NULL) %>%
+      melt() %>%
+      filter(value > 0) %>%
+      ggplot(data = . , aes(variable, value, fill = variable)) + 
+      geom_bar(stat = "identity") + facet_grid(Estacao ~ .) + 
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r NA estacao 83049}
+paste("Valores faltantes:", 
+      sum(is.na(meteo_rj[meteo_rj$Estacao == 83049, "PressaoAtmEstacao"])))
+paste("Total de observações:", dim(meteo_rj[meteo_rj$Estacao == 83049, ])[1])
+```
+
+Podemos perceber que a estação 83049 possui todas observações para PressaoAtm vazias, desse modo, para que a análise não seja muito prejudicada, excluíremos essa coluna.
+
+```{r retirando PressaoAtmEstacao}
+meteo_rj$PressaoAtmEstacao <- NULL
+names(meteo_rj)
+```
+
+```{r NA estacao 83743}
+paste("Valores faltantes:", 
+      sum(is.na(meteo_rj[meteo_rj$Estacao == 83743, "VelocidadeVento"])))
+paste("Total de observações:", dim(meteo_rj[meteo_rj$Estacao == 83743, ])[1])
+```
+
+Podemos perceber que a estação 83743 apesar de ter um grande número de valores faltantes na coluna VelocidadeVento, a maior parte das observações está lá. 
+Utilizaremos o pacote MICE para realizar a imputação dos dados faltantes.
+
+#### Imputação dos valores faltantes através de imputação multivariada por equações em cascata (pacote mice)
+
+```{r imputação meteo, eval= FALSE}
+ini <- meteo_rj %>%
+      select(c("TempBulboSeco", "TempBulboUmido", "VelocidadeVento", 
+               "UmidadeRelativa", "Nebulosidade")) %>%
+      mice(data = ., maxit = 0, seed = 1869)
+
+imp_merged <- mice.mids(ini, maxit = 3)
+meteo_rj_imputado <- complete(imp_merged)
+```
+```{r carregando meteo_rj_imputado, echo= FALSE}
+load("./dados/meteo_rj_imputado.rds")
+```
+
+#### Comparando a distribuição das variáveis antes e depois da imputação. 
+```{r comparando imputação, fig.height= 9}
+# Pequena função para auxiliar na plotagem
+plot.multi.dens <- function(s)
+{
+      junk.x = NULL
+      junk.y = NULL
+      for(i in 1:length(s)) {
+            junk.x = c(junk.x, density(s[[i]])$x)
+            junk.y = c(junk.y, density(s[[i]])$y)
+      }
+      xr <- range(junk.x)
+      yr <- range(junk.y)
+      plot(density(s[[1]]), xlim = xr, ylim = yr, main = "")
+      for(i in 1:length(s)) {
+            lines(density(s[[i]]), xlim = xr, ylim = yr, col = i)
+      }
+}
+
+par(mfrow = c(3, 2))
+for (i in names(meteo_rj_imputado)){
+      plot.multi.dens(list(cc(meteo_rj[[i]]), meteo_rj_imputado[[i]]))      
+}
+```
+
+
+#### Substituindo os valores antigos pelos novos
+```{r finalizando pré processamento meteo}
+for ( i in names(meteo_rj_imputado)){
+      meteo_rj[[i]] <- meteo_rj_imputado[[i]]
+}
+rm("meteo", "meteo_rj_imputado", imp_merged, ini, freq_table)
+```
+
+
+
+
+### Limpeza do conjuto Focos
+
+#### Checando a existência de valores faltantes
+```{r valores faltantes focos}
+paste("Valores faltantes:", sum(is.na(focos_rj)))
+```
+
+#### Criando Colunas
+
+Criando duas colunas, "mes" e "ano" para facilitar a análise.
+```{r Criano ano e mes}
+focos_rj <- focos_rj %>% 
+      mutate(mes = format(DataHora, "%m"), 
+             ano = format(DataHora, "%Y"))
+rm(focos)
+```
+
+#### Checando formatos das colunas
+```{r colunas focos, options}
+str(focos_rj)
+```
+
+## Análise exploratória
+
+### Focos
+
+```{r AED Focos, options}
+# Carregando script para realizar o multiplot
+source("scripts/multiplot.R")
+p1 <- qplot(focos_rj$mes, xlab = "Mês do ano")
+p2 <- qplot(focos_rj$Latitude, binwidth = 0.2, xlab = "Latitude")
+p3 <- qplot(focos_rj$Longitude, binwidth = 0.2, xlab = "Longitude")
+multiplot(p1,p2,p3)
+```
+
+```{r heatmap focos, message=FALSE}
+BB <- c(min(focos_rj$Longitude), min(focos_rj$Latitude), max(focos_rj$Longitude), max(focos_rj$Latitude))
+figure <- ggmap(get_map( location = BB, source = "stamen",  maptype = "toner-lite") )
+figure + 
+      geom_density2d(data = focos_rj, aes(x = Longitude, y = Latitude), size = 0.01) + 
+      stat_density2d(data = focos_rj, aes(x = Longitude, y = Latitude, fill = ..level.., alpha = ..level..), size = 0.01, 
+    bins =9, geom = "polygon") + 
+      scale_fill_gradientn(colors = heat.colors(10), guide = FALSE) + 
+    scale_alpha(range = c(0.1, 0.8), guide = FALSE)
+```
+
+## Meteo
+
+Variação da temperatura ao longo do ano por estação.
+```{r AED meteo}
+ggplot(data = meteo_rj, aes(x = mes, y = TempBulboSeco)) +
+      geom_boxplot(color = "#189ad3", fill = "#189ad3") + 
+      facet_grid(. ~ Estacao) + 
+      theme_grey() + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Integração dos Dataframes
+O objetivo da integração dos dataframes é reunir em um único dataframe as informações meteorológicas e de focos de incêndio, para cada dia 
+A integração dos dois Dataframes será realizada de acordo com o seguinte fluxo:
+
+1. Calcular o raio de alcance de cada estação meteorológica, ou seja, calcular a distancia entre cada estação e a estação mais próxima a ela e dividir essa distância por dois.
+2. Para cada registro do dataframe meteo:
+    * Selecionar todos os focos do dataframe focos que ocorreram no dia do registro;
+    * Calcular a distância entre a estação e todos os focos e verificar se eles estão dentro do raio de alcance da estação.
+    * Caso positivo, registrar o número de focos em uma nova coluna
+    * Caso negativo, registrar 0 focos em uma nova coluna
+3. Será criada uma nova coluna "incendio" e caso o registro tenha pelo menos 1 foco, essa coluna receberá "sim", caso contrário, "nao".

@@ -345,7 +345,7 @@ ggplot(data = meteo_rj, aes(x = mes, y = Nebulosidade, group = mes)) +
 
 
 Localização das estações meteorológicas
-```{r Localização das estações, message=FALSE}
+```{r Localização das estações, message=FALSE, warning=FALSE}
 estacoes = unique(meteo_rj[,c(1, 9, 10)])
 figure2 <- ggmap(get_map( location = BB, source = "stamen",  maptype = "toner-lite") ) 
 figure2 + 

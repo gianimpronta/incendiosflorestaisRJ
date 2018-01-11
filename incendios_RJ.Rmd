@@ -22,6 +22,10 @@ library(ggmap)
 library(Hmisc)
 library(corrplot)
 library(geosphere)
+library(rattle)
+library(caret)
+library(maps)
+library(mapdata)
 ```
 
 
@@ -386,7 +390,7 @@ meteo_rj <- meteo_rj[,-c("Hora", "mes", "ano"), with = FALSE
 depois <- nrow(meteo_rj)
 
 sprintf("Redução de %.2f%% após a agregação do dataset.", (depois/antes)*100)
-  ```
+```
 
 ## Integração dos Dataframes
 O objetivo da integração dos dataframes é reunir em um único dataframe as informações meteorológicas e de focos de incêndio, para cada dia .
@@ -498,4 +502,99 @@ head(dt_final)
 tail(dt_final)
 str(dt_final)
 summary(dt_final)
+```
+
+A coluna incendio será a nossa coluna alvo. Desde já, podemos percerber que as classes da nossa coluna alvo está desbalanceada o que poderá interferir na mineração de dados. 
+
+Desse medo, iremos criar um novo dataset com as classes balanceadas.
+```{r Balanceamento de classes}
+n_sim <- table(dt_final$incendio)[2]
+idx_nao <- which(dt_final$incendio == "nao")
+idx_sim <- which(dt_final$incendio == "sim")
+idx <- idx_nao[sample(length(idx_nao), n_sim)]
+dt_nao <- dt_final[idx]
+dt_sim <- dt_final[idx_sim]
+dt_balanceado <- rbind(dt_sim, dt_nao)
+```
+# Mineração de dados
+
+Separando em dois datasets, um para treino e outro para testes
+```{r Sampling}
+idx <- createDataPartition(dt_balanceado$incendio, p = .75, list = FALSE)
+treino <- dt_balanceado[idx,]
+teste <- dt_balanceado[-idx,]
+```
+
+Configurando o método de treino do algoritmo, a função utilizará a validação cruzada com kfold = 10 para escolher os melhores parâmetros automaticamente.
+```{r train control}
+control <- trainControl(method="cv",
+                        number = 10,
+                        savePredictions="final", classProbs = T)
+```
+
+Fórmula a ser utilizada, ou seja as variáveis preditoras e a variável predita.
+```{r formula}
+form <- as.formula("incendio ~ Data+TempBulboSeco+TempBulboUmido+
+                         UmidadeRelativa+VelocidadeVento+
+                         Nebulosidade+Latitude+Longitude+mes")
+```
+
+Foram definidos alguns parâmetros de _tuning_ para o algoritmo, a função _train_ irá tentar ajustar o algoritmo utilizando a métrica "Accuracy", através da validação cruzada com k = 10.
+```{r train, eval=T}
+set.seed(1869)
+metric <- "Accuracy"
+tuning <-  expand.grid(interaction.depth = c(3, 6, 9),
+                          n.trees = c(100, 250), 
+                          shrinkage = .1,
+                          n.minobsinnode = c(10, 20, 30))
+fit <- train(form, data = treino,
+                 trControl = control, method = "rf", 
+                 metric = metric)
+```
+
+Resultados de diferentes parametrizações:
+```{r sumario do fit, echo=F}
+fit
+```
+
+# __Interpretação e Avaliação__
+
+O seguinte gráfico mostra o a acurácia em relação aos diferentes parâmetros utilizados durante o ajuste.
+```{r plot parâmetros modelo}
+plot(fit)
+```
+
+Gráfico mostrando a importância de cada variável para a predição.
+```{r importância das variáveis}
+ggplot(varImp(fit)) + theme_minimal()
+```
+
+A partir desse modelo final vamos testar com o dataset "teste" que foi separado no início da análise.
+
+```{r Matriz confusão, options}
+pred <- predict(fit, teste)
+mat_conf <- confusionMatrix(pred, reference = teste$incendio, 
+                             positive = "sim")
+mat_conf
+```
+
+De acordo com a matriz de confusão:
+
+- O algoritmo teve uma acurácia de 85,09%, isto é, acertou 85% das previsões no geral;
+- 54,39% de sensibilidade; classificou como "sim" 54,39% dos eventos que realmente eram "sim";
+- 76,29% de precisão; 76,29% dos eventos classificados como "sim", realmente eram "sim"
+- 94,7% de especificidade; classificou como "nao" 94,7% dos eventos que realmente eram "nao";
+
+Essa diferença se deve ao fato das classes estarem desbalanceadas no dataset original, esse desbalanceamento é medido pela prevalência, que representa a proporção do valor positivo, no caso "sim", em relação à quantidade valores negativos, "nao". Para o nosso dataset de teste a prevalência está em 23,86%.
+
+Outro ponto a ser observado é que a maior parte das predições errôneas ocorreram em estações do centro-oeste e norte do país, e que a quantidade de estações nessas áres é relativamente baixa em relação a outras áreas do país.
+```{r mapa desempenho por estacao, options}
+figure2+ 
+      geom_count(data = cbind(teste, pred)[,acerto := ifelse(incendio==pred, "sim", "nao")], 
+       aes(x=Longitude, y=Latitude, color = acerto, size = ..prop..), show.legend = T) + 
+      scale_size_area(max_size = 5) + theme_bw() +
+      scale_color_brewer(type = "div",direction = 1, palette = "Spectral")
+
+data.table(cbind(teste, pred)[,acerto := ifelse(incendio==pred, "sim", "nao")])
+
 ```

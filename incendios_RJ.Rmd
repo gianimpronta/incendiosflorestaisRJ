@@ -6,7 +6,7 @@ output:
 ---
 ```{r setup, echo=FALSE}
 knitr::opts_chunk$set(cache = TRUE)
-knitr::opts_chunk$set(comment = ">")
+knitr::opts_chunk$set(comment = " ")
 
 ```
 
@@ -19,6 +19,8 @@ library(ggplot2)
 library(mice)
 library(data.table)
 library(ggmap)
+library(Hmisc)
+library(corrplot)
 ```
 
 
@@ -100,7 +102,7 @@ A primeira filtragem do conjunto focos reduziu o número de observações de 8.6
 meteo_rj <- meteo %>%
     filter(Estacao == 83049 | Estacao == 83738 | Estacao ==  83743 | 
                Estacao == 83718 | Estacao == 83698 | Estacao == 83695) %>%
-    mutate(mes = format(.[["Data"]], "%m"), ano = format(.[["Data"]], "%Y"))
+    mutate(mes = as.numeric(format(.[["Data"]], "%m")), ano = as.numeric(format(.[["Data"]], "%Y")))
 100-(dim(meteo_rj)[1]/dim(meteo)[1]*100)
 ```
 
@@ -127,7 +129,7 @@ Todas as estações tem dados para todos os anos.
 #### Distribuição de Valores faltantes por ano
 ```{r distribuição valores faltantes por ano}
 aggregate(. ~ ano, data=meteo_rj, function(x) {sum(is.na(x))}, na.action = NULL) %>%
-      melt() %>% 
+      melt(id.vars = "ano") %>% 
       filter (value > 0) %>%
       ggplot(data = . , aes(variable, value, fill = variable)) + 
       geom_bar(stat = "identity") + facet_grid(ano ~ .) + 
@@ -212,7 +214,7 @@ for (i in names(meteo_rj_imputado)){
 for ( i in names(meteo_rj_imputado)){
       meteo_rj[[i]] <- meteo_rj_imputado[[i]]
 }
-rm("meteo", "meteo_rj_imputado", imp_merged, ini, freq_table)
+rm("meteo", "meteo_rj_imputado", freq_table)
 ```
 
 
@@ -244,35 +246,134 @@ str(focos_rj)
 
 ### Focos
 
+Distibuição das queimadas ao longo do ano, da Latitude e Longitude
 ```{r AED Focos, options}
 # Carregando script para realizar o multiplot
 source("scripts/multiplot.R")
 p1 <- qplot(focos_rj$mes, xlab = "Mês do ano")
-p2 <- qplot(focos_rj$Latitude, binwidth = 0.2, xlab = "Latitude")
-p3 <- qplot(focos_rj$Longitude, binwidth = 0.2, xlab = "Longitude")
+p2 <- qplot(focos_rj$Latitude, binwidth = 0.1, xlab = "Latitude")
+p3 <- qplot(focos_rj$Longitude, binwidth = 0.1, xlab = "Longitude")
 multiplot(p1,p2,p3)
 ```
 
+Locais com maior incidência de focos de queimadas.
 ```{r heatmap focos, message=FALSE}
-BB <- c(min(focos_rj$Longitude), min(focos_rj$Latitude), max(focos_rj$Longitude), max(focos_rj$Latitude))
+BB <- c(min(focos_rj$Longitude - 0.1), min(focos_rj$Latitude - 0.1), 
+        max(focos_rj$Longitude + 0.1), max(focos_rj$Latitude + 0.1))
 figure <- ggmap(get_map( location = BB, source = "stamen",  maptype = "toner-lite") )
 figure + 
       geom_density2d(data = focos_rj, aes(x = Longitude, y = Latitude), size = 0.01) + 
       stat_density2d(data = focos_rj, aes(x = Longitude, y = Latitude, fill = ..level.., alpha = ..level..), size = 0.01, 
-    bins =9, geom = "polygon") + 
-      scale_fill_gradientn(colors = heat.colors(10), guide = FALSE) + 
+    bins =16, geom = "polygon") + 
+      scale_fill_gradientn(colors = heat.colors(16), guide = FALSE) + 
     scale_alpha(range = c(0.1, 0.8), guide = FALSE)
 ```
 
+```{r label, options}
+p1 <- qplot(focos_rj$DiasSemChuva, xlab = "Dias Sem Chuva", bins = 30)
+p2 <- qplot(focos_rj$Precipitacao, xlab = "Precipitação", bins = 100)
+p3 <- qplot(focos_rj$RiscoFogo, xlab = " RiscoFogo", bins = 30)
+p4 <- focos_rj %>%
+  group_by(Municipio) %>%
+  summarise(count = n()) %>%
+  mutate(Municipio = factor(.$Municipio, levels = .$Municipio[order(-.$count)])) %>%
+  top_n(10) %>%
+  ggplot(data = ., aes(x = Municipio, y = count)) + 
+    geom_bar(stat = "identity") +
+    theme_grey() + theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8))
+multiplot(p1,p2,p3,p4, cols = 2)
+```
+
+De cima para baixo em sentido horário a partir da esquerda:
+
+- Distribuição da quantidade de dias sem chuva no momento do incendio;
+- Distribuição do Risco de Fogo no momento dos incêndios;
+- 10 Municípios com maior quantidade de incêndios;
+- Distribuição da precipitação no dia dos incêndios
+
 ## Meteo
 
-Variação da temperatura ao longo do ano por estação.
+Variação da temperatura medida com termômetro de bulbo seco ao longo do ano por estação.
 ```{r AED meteo}
-ggplot(data = meteo_rj, aes(x = mes, y = TempBulboSeco)) +
-      geom_boxplot(color = "#189ad3", fill = "#189ad3") + 
+ggplot(data = meteo_rj, aes(x = mes, y = TempBulboSeco, group = mes)) +
+      geom_boxplot(color = "black", fill = "#189ad3") + 
       facet_grid(. ~ Estacao) + 
-      theme_grey() + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+      theme_grey() + theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
 ```
+
+Variação da temperatura medida com termômetro de bulbo úmido ao longo do ano por estação.
+
+```{r Bulbo umido por ano, options}
+ggplot(data = meteo_rj, aes(x = mes, y = TempBulboUmido, group = mes)) +
+      geom_boxplot(color = "black", fill = "#189ad3") + 
+      facet_grid(. ~ Estacao) + 
+      theme_grey() + theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
+```
+
+Variação das diferentes tempeturas de diferentes termômetros.
+```{r Violin plot temp, options}
+ggplot(data = melt(meteo_rj[,c(1,4:5)], id.vars = "Estacao"), aes(x = variable, y = value, fill = variable)) +
+      geom_violin(draw_quantiles = c(.25,.5,.75), scale = "area") + 
+      facet_grid(. ~ Estacao) + 
+      theme_grey() + theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 9))
+```
+
+Variação da umidade relativa ao longo do ano por estação
+```{r Umidade por ano, options}
+ggplot(data = meteo_rj, aes(x = mes, y = UmidadeRelativa, group = mes)) +
+      geom_boxplot(color = "black", fill = "#189ad3") + 
+      facet_grid(. ~ Estacao) + 
+      theme_grey() + theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
+```
+
+Variação da velocidade do vento ao longo do ano por estação
+```{r velocidade do vento por ano, options}
+ggplot(data = meteo_rj, aes(x = mes, y = VelocidadeVento, group = mes)) +
+      geom_boxplot(color = "black", fill = "#189ad3") + 
+      facet_grid(. ~ Estacao) + 
+      theme_grey() + theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
+```
+
+Variação da nebulosidade ao longo do ano por estação
+```{r Nebuloside por ano, options}
+ggplot(data = meteo_rj, aes(x = mes, y = Nebulosidade, group = mes)) +
+      geom_boxplot(color = "black", fill = "#189ad3") + 
+      facet_grid(. ~ Estacao) + 
+      theme_grey() + theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
+```
+
+
+
+Localização das estações meteorológicas
+```{r Localização das estações, message=FALSE}
+estacoes = unique(meteo_rj[,c(1, 9, 10)])
+figure2 <- ggmap(get_map( location = BB, source = "stamen",  maptype = "toner-lite") ) 
+figure2 + 
+  geom_point(data = estacoes, aes(x= Longitude, y = Latitude), color = "red", size = 2, alpha = 0.6) +
+  geom_label(data = estacoes, aes(label = paste("Estação", Estacao), x = Longitude, y = Latitude), 
+             nudge_x = -0.2, nudge_y = 0.1, size = 3)
+```
+
+Matriz de Correlação das Variáveis
+```{r Matriz de correlação}
+res <- rcorr(as.matrix(meteo_rj[,3:11]))
+corrplot(res$r, 
+         type = "upper",
+         order="hclust", 
+         p.mat = res$P, 
+         sig.level = 0.01, 
+         insig = "pch")
+```
+
+Podemos observar:
+
+- Correlação direta razoável entre Umidade Relativa x Hora;
+- Correlação indireta forte entre Umidade Relativa x Temperatura de Bulbo Seco;
+- Correlação direta razoável entre Hora x Temperatura de Bulbo Seco;
+- Correlação direta forte entre Temperatura de Bulbo Seco e Temperatura de Bulbo Úmido;
+
+
+
 
 ## Integração dos Dataframes
 O objetivo da integração dos dataframes é reunir em um único dataframe as informações meteorológicas e de focos de incêndio, para cada dia 

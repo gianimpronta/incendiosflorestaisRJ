@@ -21,6 +21,7 @@ library(data.table)
 library(ggmap)
 library(Hmisc)
 library(corrplot)
+library(geosphere)
 ```
 
 
@@ -291,7 +292,7 @@ De cima para baixo em sentido horário a partir da esquerda:
 - 10 Municípios com maior quantidade de incêndios;
 - Distribuição da precipitação no dia dos incêndios
 
-## Meteo
+### Meteo
 
 Variação da temperatura medida com termômetro de bulbo seco ao longo do ano por estação.
 ```{r AED meteo}
@@ -372,17 +373,129 @@ Podemos observar:
 - Correlação direta razoável entre Hora x Temperatura de Bulbo Seco;
 - Correlação direta forte entre Temperatura de Bulbo Seco e Temperatura de Bulbo Úmido;
 
+## Agregação
 
+Realizaremos as agregação dos dados por dia para agilizar o processamento dos dados.
+```{r agregação meteo}
+antes <- nrow(meteo_rj)
+# Transformanddo em data.table para maior agilidade
+meteo_rj <- setDT(meteo_rj)
+# Retirando algumas colunas e agregando os dados por dia, utilizando a média do dia.
+meteo_rj <- meteo_rj[,-c("Hora", "mes", "ano"), with = FALSE
+                          ][, lapply(.SD, mean), by = .(Data, Estacao)]
+depois <- nrow(meteo_rj)
 
+sprintf("Redução de %.2f%% após a agregação do dataset.", (depois/antes)*100)
+  ```
 
 ## Integração dos Dataframes
-O objetivo da integração dos dataframes é reunir em um único dataframe as informações meteorológicas e de focos de incêndio, para cada dia 
+O objetivo da integração dos dataframes é reunir em um único dataframe as informações meteorológicas e de focos de incêndio, para cada dia .
 A integração dos dois Dataframes será realizada de acordo com o seguinte fluxo:
 
-1. Calcular o raio de alcance de cada estação meteorológica, ou seja, calcular a distancia entre cada estação e a estação mais próxima a ela e dividir essa distância por dois.
+1. Calcular o raio de alcance de cada estação meteorológica, ou seja, calcular a distância entre cada estação e a estação mais próxima a ela e dividir essa distância por dois.
 2. Para cada registro do dataframe meteo:
     * Selecionar todos os focos do dataframe focos que ocorreram no dia do registro;
     * Calcular a distância entre a estação e todos os focos e verificar se eles estão dentro do raio de alcance da estação.
-    * Caso positivo, registrar o número de focos em uma nova coluna
-    * Caso negativo, registrar 0 focos em uma nova coluna
+    * Caso positivo, registrar o número de focos em uma nova coluna (n_focos)
+    * Caso negativo, registrar 0 focos em uma nova coluna (n_focos)
 3. Será criada uma nova coluna "incendio" e caso o registro tenha pelo menos 1 foco, essa coluna receberá "sim", caso contrário, "nao".
+
+```{r integração focos para meteo, eval = FALSE}
+# Função principal 
+juncao <- function(df_focos, df_meteo=df_meteo, dt_estacoes = NULL){
+      if (is.null(dt_estacoes)){
+            dt_estacoes <- cria_estacoes(df_meteo)
+      }     
+      dt_meteo <- setDT(df_meteo)
+      dt_focos <- setDT(df_focos)
+      dt_focos <- df_focos[,DataHora := as.IDate(DataHora)]
+      for (i in 1:nrow(dt_meteo)){
+            # para cada obs_meteo calcular se tem um foco dentro do raio da 
+            # estacão no dia
+            obs_meteo <- dt_meteo[i]
+            fdia <- focos_no_dia(obs_meteo, dt_focos)
+            if (nrow(fdia) > 0){ 
+                  n_focos <- checa_dist(obs_meteo, fdia, dt_estacoes)
+            } else {
+                  n_focos <- 0
+            }
+            dt_meteo[i, "n_focos"] <- n_focos 
+      }
+return(dt_meteo)
+}
+# Cria tabela das estações e seus raios de ação
+cria_estacoes <- function(df_meteo){
+      dt_estacoes <- setDT(df_meteo[,c("Estacao", "Longitude", "Latitude")])
+      dt_estacoes <- unique(dt_estacoes)
+      for (i in 1:nrow(dt_estacoes)){
+            dt_estacoes[i,"Raio"] <- cria_raio_estacao(dt_estacoes[i,2:3, 
+                                                                  with = FALSE],
+                                                       dt_estacoes)
+      }
+      dt_estacoes <- dt_estacoes[,lapply(.SD, mean), by = .(Estacao)]
+      setkey(dt_estacoes, Estacao)
+      return(dt_estacoes)
+}
+# Calcula os raios
+cria_raio_estacao <- function(ponto, dt_estacoes){
+      matriz <- setattr(as.data.frame(distm(ponto, as.matrix(dt_estacoes[,2:3, 
+                                                                with = FALSE])), 
+                                      stringsAsFactors=FALSE),
+                        "class", "data.table")
+      matriz <- matriz[,matriz > 100, with = FALSE]
+      idx <- which.min(matriz)
+      return(as.numeric(matriz[,..idx])/2)
+}
+# Separa o focos do referido dia
+focos_no_dia <- function(obs_meteo, dt_focos){
+      dia <- obs_meteo[,Data]
+      return(dt_focos[DataHora == as.IDate(format(dia, "%Y-%m-%d"))])
+}
+# Calcula a distância e confere se está dentro do raio de ação
+checa_dist <- function(obs_meteo, dt_focos, dt_estacoes){
+      # extrai número estacao
+      estacao <- obs_meteo[,Estacao]
+      # checa em estacoes pelas coordenadas da estacao
+      coord_estacao <- dt_estacoes[Estacao == estacao, 
+                                   c("Longitude", "Latitude"), 
+                                   with= FALSE]
+      # checa em estacoes pelo raio da estacao
+      raio_estacao <- dt_estacoes[Estacao == estacao, Raio]
+      # calcula distancias entre todos os focos e a estacao
+      matriz <- setattr(
+            as.data.frame(distm(coord_estacao, 
+                                as.matrix(dt_focos[,c("Longitude", "Latitude"), 
+                                                   with = FALSE])), 
+                                      stringsAsFactors=FALSE), "class", 
+                        "data.table")
+      # verifica se existem focos dentro do raio
+      n_focos <- sum(matriz <= raio_estacao)
+      # caso positivo retorna o número de focos
+      return(n_focos)
+}
+
+dt_estacoes <- cria_estacoes(meteo_rj)
+dt_final <- juncao(focos_rj, meteo_rj, dt_estacoes)
+```
+```{r carregando dt_final, echo = FALSE}
+load(file = "./dados/dt_final.RData")
+```
+```{r criando colunas dt_final}
+# Recriando as colunas mes e ano
+dt_final[, c("mes", "ano") := list(as.numeric(format(Data, "%m")), 
+                                   as.numeric(format(Data, "%Y")))]
+```
+
+Criando a coluna Incêndio:
+```{r criando a coluna incendio}
+dt_final[, "incendio" := ifelse(n_focos > 0, "sim", "nao")]
+dt_final$incendio <- as.factor(dt_final$incendio)
+```
+
+Dataset final:
+```{r Dataset final}
+head(dt_final)
+tail(dt_final)
+str(dt_final)
+summary(dt_final)
+```

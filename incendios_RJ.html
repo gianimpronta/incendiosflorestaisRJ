@@ -132,7 +132,9 @@ library(mice)
 library(data.table)
 library(ggmap)
 library(Hmisc)
-library(corrplot)</code></pre>
+library(corrplot)
+library(geosphere)</code></pre>
+<pre><code>  Warning: package 'geosphere' was built under R version 3.4.3</code></pre>
 <div id="objetivos" class="section level1">
 <h1><strong>Objetivos</strong></h1>
 <p>Está analise consiste na utilização de observações de queimadas e incêndios florestais feitas pelo INPE (Instituto Nacional de Pesquisas Espaciais) em conjunto com observações de estações meteorológicas convencionais do INMET( Instituto Nacional de Meteorologia) na tentativa de obter correlações entre as queimadas e incêndios florestais e as condições meteorológicas de forma a predizer quando ocorrerá um evento.</p>
@@ -441,9 +443,8 @@ p4 &lt;- focos_rj %&gt;%
 <li>Distribuição da precipitação no dia dos incêndios</li>
 </ul>
 </div>
-</div>
-<div id="meteo" class="section level2">
-<h2>Meteo</h2>
+<div id="meteo" class="section level3">
+<h3>Meteo</h3>
 <p>Variação da temperatura medida com termômetro de bulbo seco ao longo do ano por estação.</p>
 <pre class="r"><code>ggplot(data = meteo_rj, aes(x = mes, y = TempBulboSeco, group = mes)) +
       geom_boxplot(color = &quot;black&quot;, fill = &quot;#189ad3&quot;) + 
@@ -505,20 +506,174 @@ corrplot(res$r,
 <li>Correlação direta forte entre Temperatura de Bulbo Seco e Temperatura de Bulbo Úmido;</li>
 </ul>
 </div>
+</div>
+<div id="agregacao" class="section level2">
+<h2>Agregação</h2>
+<p>Realizaremos as agregação dos dados por dia para agilizar o processamento dos dados.</p>
+<pre class="r"><code>antes &lt;- nrow(meteo_rj)
+# Transformanddo em data.table para maior agilidade
+meteo_rj &lt;- setDT(meteo_rj)
+# Retirando algumas colunas e agregando os dados por dia, utilizando a média do dia.
+meteo_rj &lt;- meteo_rj[,-c(&quot;Hora&quot;, &quot;mes&quot;, &quot;ano&quot;), with = FALSE
+                          ][, lapply(.SD, mean), by = .(Data, Estacao)]
+depois &lt;- nrow(meteo_rj)
+
+sprintf(&quot;Redução de %.2f%% após a agregação do dataset.&quot;, (depois/antes)*100)</code></pre>
+<pre><code>  [1] &quot;Redução de 35.18% após a agregação do dataset.&quot;</code></pre>
+</div>
 <div id="integracao-dos-dataframes" class="section level2">
 <h2>Integração dos Dataframes</h2>
-<p>O objetivo da integração dos dataframes é reunir em um único dataframe as informações meteorológicas e de focos de incêndio, para cada dia A integração dos dois Dataframes será realizada de acordo com o seguinte fluxo:</p>
+<p>O objetivo da integração dos dataframes é reunir em um único dataframe as informações meteorológicas e de focos de incêndio, para cada dia . A integração dos dois Dataframes será realizada de acordo com o seguinte fluxo:</p>
 <ol style="list-style-type: decimal">
-<li>Calcular o raio de alcance de cada estação meteorológica, ou seja, calcular a distancia entre cada estação e a estação mais próxima a ela e dividir essa distância por dois.</li>
+<li>Calcular o raio de alcance de cada estação meteorológica, ou seja, calcular a distância entre cada estação e a estação mais próxima a ela e dividir essa distância por dois.</li>
 <li>Para cada registro do dataframe meteo:
 <ul>
 <li>Selecionar todos os focos do dataframe focos que ocorreram no dia do registro;</li>
 <li>Calcular a distância entre a estação e todos os focos e verificar se eles estão dentro do raio de alcance da estação.</li>
-<li>Caso positivo, registrar o número de focos em uma nova coluna</li>
-<li>Caso negativo, registrar 0 focos em uma nova coluna</li>
+<li>Caso positivo, registrar o número de focos em uma nova coluna (n_focos)</li>
+<li>Caso negativo, registrar 0 focos em uma nova coluna (n_focos)</li>
 </ul></li>
 <li>Será criada uma nova coluna “incendio” e caso o registro tenha pelo menos 1 foco, essa coluna receberá “sim”, caso contrário, “nao”.</li>
 </ol>
+<pre class="r"><code># Função principal 
+juncao &lt;- function(df_focos, df_meteo=df_meteo, dt_estacoes = NULL){
+      if (is.null(dt_estacoes)){
+            dt_estacoes &lt;- cria_estacoes(df_meteo)
+      }     
+      dt_meteo &lt;- setDT(df_meteo)
+      dt_focos &lt;- setDT(df_focos)
+      dt_focos &lt;- df_focos[,DataHora := as.IDate(DataHora)]
+      for (i in 1:nrow(dt_meteo)){
+            # para cada obs_meteo calcular se tem um foco dentro do raio da 
+            # estacão no dia
+            obs_meteo &lt;- dt_meteo[i]
+            fdia &lt;- focos_no_dia(obs_meteo, dt_focos)
+            if (nrow(fdia) &gt; 0){ 
+                  n_focos &lt;- checa_dist(obs_meteo, fdia, dt_estacoes)
+            } else {
+                  n_focos &lt;- 0
+            }
+            dt_meteo[i, &quot;n_focos&quot;] &lt;- n_focos 
+      }
+return(dt_meteo)
+}
+# Cria tabela das estações e seus raios de ação
+cria_estacoes &lt;- function(df_meteo){
+      dt_estacoes &lt;- setDT(df_meteo[,c(&quot;Estacao&quot;, &quot;Longitude&quot;, &quot;Latitude&quot;)])
+      dt_estacoes &lt;- unique(dt_estacoes)
+      for (i in 1:nrow(dt_estacoes)){
+            dt_estacoes[i,&quot;Raio&quot;] &lt;- cria_raio_estacao(dt_estacoes[i,2:3, 
+                                                                  with = FALSE],
+                                                       dt_estacoes)
+      }
+      dt_estacoes &lt;- dt_estacoes[,lapply(.SD, mean), by = .(Estacao)]
+      setkey(dt_estacoes, Estacao)
+      return(dt_estacoes)
+}
+# Calcula os raios
+cria_raio_estacao &lt;- function(ponto, dt_estacoes){
+      matriz &lt;- setattr(as.data.frame(distm(ponto, as.matrix(dt_estacoes[,2:3, 
+                                                                with = FALSE])), 
+                                      stringsAsFactors=FALSE),
+                        &quot;class&quot;, &quot;data.table&quot;)
+      matriz &lt;- matriz[,matriz &gt; 100, with = FALSE]
+      idx &lt;- which.min(matriz)
+      return(as.numeric(matriz[,..idx])/2)
+}
+# Separa o focos do referido dia
+focos_no_dia &lt;- function(obs_meteo, dt_focos){
+      dia &lt;- obs_meteo[,Data]
+      return(dt_focos[DataHora == as.IDate(format(dia, &quot;%Y-%m-%d&quot;))])
+}
+# Calcula a distância e confere se está dentro do raio de ação
+checa_dist &lt;- function(obs_meteo, dt_focos, dt_estacoes){
+      # extrai número estacao
+      estacao &lt;- obs_meteo[,Estacao]
+      # checa em estacoes pelas coordenadas da estacao
+      coord_estacao &lt;- dt_estacoes[Estacao == estacao, 
+                                   c(&quot;Longitude&quot;, &quot;Latitude&quot;), 
+                                   with= FALSE]
+      # checa em estacoes pelo raio da estacao
+      raio_estacao &lt;- dt_estacoes[Estacao == estacao, Raio]
+      # calcula distancias entre todos os focos e a estacao
+      matriz &lt;- setattr(
+            as.data.frame(distm(coord_estacao, 
+                                as.matrix(dt_focos[,c(&quot;Longitude&quot;, &quot;Latitude&quot;), 
+                                                   with = FALSE])), 
+                                      stringsAsFactors=FALSE), &quot;class&quot;, 
+                        &quot;data.table&quot;)
+      # verifica se existem focos dentro do raio
+      n_focos &lt;- sum(matriz &lt;= raio_estacao)
+      # caso positivo retorna o número de focos
+      return(n_focos)
+}
+
+dt_estacoes &lt;- cria_estacoes(meteo_rj)
+dt_final &lt;- juncao(focos_rj, meteo_rj, dt_estacoes)</code></pre>
+<pre class="r"><code># Recriando as colunas mes e ano
+dt_final[, c(&quot;mes&quot;, &quot;ano&quot;) := list(as.numeric(format(Data, &quot;%m&quot;)), 
+                                   as.numeric(format(Data, &quot;%Y&quot;)))]</code></pre>
+<p>Criando a coluna Incêndio:</p>
+<pre class="r"><code>dt_final[, &quot;incendio&quot; := ifelse(n_focos &gt; 0, &quot;sim&quot;, &quot;nao&quot;)]
+dt_final$incendio &lt;- as.factor(dt_final$incendio)</code></pre>
+<p>Dataset final:</p>
+<pre class="r"><code>head(dt_final)</code></pre>
+<div data-pagedtable="false">
+<script data-pagedtable-source type="application/json">
+{"columns":[{"label":["Data"],"name":[1],"type":["date"],"align":["right"]},{"label":["Estacao"],"name":[2],"type":["fctr"],"align":["left"]},{"label":["TempBulboSeco"],"name":[3],"type":["dbl"],"align":["right"]},{"label":["TempBulboUmido"],"name":[4],"type":["dbl"],"align":["right"]},{"label":["UmidadeRelativa"],"name":[5],"type":["dbl"],"align":["right"]},{"label":["VelocidadeVento"],"name":[6],"type":["dbl"],"align":["right"]},{"label":["Nebulosidade"],"name":[7],"type":["dbl"],"align":["right"]},{"label":["Latitude"],"name":[8],"type":["dbl"],"align":["right"]},{"label":["Longitude"],"name":[9],"type":["dbl"],"align":["right"]},{"label":["n_focos"],"name":[10],"type":["dbl"],"align":["right"]},{"label":["mes"],"name":[11],"type":["dbl"],"align":["right"]},{"label":["ano"],"name":[12],"type":["dbl"],"align":["right"]},{"label":["incendio"],"name":[13],"type":["fctr"],"align":["left"]}],"data":[{"1":"2010-01-01","2":"83049","3":"25.00000","4":"22.43333","5":"80.66667","6":"1.000000","7":"8.333333","8":"-22.35","9":"-43.41","10":"0","11":"1","12":"2010","13":"nao"},{"1":"2010-01-02","2":"83049","3":"26.56667","4":"22.36667","5":"71.00000","6":"1.333333","7":"3.333333","8":"-22.35","9":"-43.41","10":"0","11":"1","12":"2010","13":"nao"},{"1":"2010-01-03","2":"83049","3":"26.90000","4":"21.70000","5":"65.66667","6":"1.333333","7":"0.000000","8":"-22.35","9":"-43.41","10":"0","11":"1","12":"2010","13":"nao"},{"1":"2010-01-04","2":"83049","3":"26.80000","4":"22.50000","5":"71.33333","6":"1.000000","7":"2.333333","8":"-22.35","9":"-43.41","10":"0","11":"1","12":"2010","13":"nao"},{"1":"2010-01-05","2":"83049","3":"27.50000","4":"23.43333","5":"71.33333","6":"1.000000","7":"5.000000","8":"-22.35","9":"-43.41","10":"0","11":"1","12":"2010","13":"nao"},{"1":"2010-01-06","2":"83049","3":"25.36667","4":"22.43333","5":"78.33333","6":"1.000000","7":"6.666667","8":"-22.35","9":"-43.41","10":"0","11":"1","12":"2010","13":"nao"}],"options":{"columns":{"min":{},"max":[10]},"rows":{"min":[10],"max":[10]},"pages":{}}}
+  </script>
+</div>
+<pre class="r"><code>tail(dt_final)</code></pre>
+<div data-pagedtable="false">
+<script data-pagedtable-source type="application/json">
+{"columns":[{"label":["Data"],"name":[1],"type":["date"],"align":["right"]},{"label":["Estacao"],"name":[2],"type":["fctr"],"align":["left"]},{"label":["TempBulboSeco"],"name":[3],"type":["dbl"],"align":["right"]},{"label":["TempBulboUmido"],"name":[4],"type":["dbl"],"align":["right"]},{"label":["UmidadeRelativa"],"name":[5],"type":["dbl"],"align":["right"]},{"label":["VelocidadeVento"],"name":[6],"type":["dbl"],"align":["right"]},{"label":["Nebulosidade"],"name":[7],"type":["dbl"],"align":["right"]},{"label":["Latitude"],"name":[8],"type":["dbl"],"align":["right"]},{"label":["Longitude"],"name":[9],"type":["dbl"],"align":["right"]},{"label":["n_focos"],"name":[10],"type":["dbl"],"align":["right"]},{"label":["mes"],"name":[11],"type":["dbl"],"align":["right"]},{"label":["ano"],"name":[12],"type":["dbl"],"align":["right"]},{"label":["incendio"],"name":[13],"type":["fctr"],"align":["left"]}],"data":[{"1":"2016-12-26","2":"83743","3":"28.70","4":"24.40","5":"74.5","6":"1.00","7":"1.875","8":"-22.89","9":"-43.18","10":"0","11":"12","12":"2016","13":"nao"},{"1":"2016-12-27","2":"83743","3":"31.45","4":"26.75","5":"78.0","6":"1.30","7":"3.750","8":"-22.89","9":"-43.18","10":"0","11":"12","12":"2016","13":"nao"},{"1":"2016-12-28","2":"83743","3":"33.65","4":"26.95","5":"62.5","6":"0.50","7":"1.250","8":"-22.89","9":"-43.18","10":"0","11":"12","12":"2016","13":"nao"},{"1":"2016-12-29","2":"83743","3":"31.55","4":"25.95","5":"71.5","6":"1.00","7":"4.375","8":"-22.89","9":"-43.18","10":"0","11":"12","12":"2016","13":"nao"},{"1":"2016-12-30","2":"83743","3":"30.85","4":"26.10","5":"71.0","6":"1.50","7":"0.000","8":"-22.89","9":"-43.18","10":"0","11":"12","12":"2016","13":"nao"},{"1":"2016-12-31","2":"83743","3":"27.35","4":"24.90","5":"81.5","6":"1.05","7":"3.750","8":"-22.89","9":"-43.18","10":"0","11":"12","12":"2016","13":"nao"}],"options":{"columns":{"min":{},"max":[10]},"rows":{"min":[10],"max":[10]},"pages":{}}}
+  </script>
+</div>
+<pre class="r"><code>str(dt_final)</code></pre>
+<pre><code>  Classes 'data.table' and 'data.frame':    14968 obs. of  13 variables:
+   $ Data           : Date, format: &quot;2010-01-01&quot; &quot;2010-01-02&quot; ...
+   $ Estacao        : Factor w/ 6 levels &quot;83049&quot;,&quot;83695&quot;,..: 1 1 1 1 1 1 1 1 1 1 ...
+   $ TempBulboSeco  : num  25 26.6 26.9 26.8 27.5 ...
+   $ TempBulboUmido : num  22.4 22.4 21.7 22.5 23.4 ...
+   $ UmidadeRelativa: num  80.7 71 65.7 71.3 71.3 ...
+   $ VelocidadeVento: num  1 1.33 1.33 1 1 ...
+   $ Nebulosidade   : num  8.33 3.33 0 2.33 5 ...
+   $ Latitude       : num  -22.4 -22.4 -22.4 -22.4 -22.4 ...
+   $ Longitude      : num  -43.4 -43.4 -43.4 -43.4 -43.4 ...
+   $ n_focos        : num  0 0 0 0 0 0 0 0 0 0 ...
+   $ mes            : num  1 1 1 1 1 1 1 1 1 1 ...
+   $ ano            : num  2010 2010 2010 2010 2010 2010 2010 2010 2010 2010 ...
+   $ incendio       : Factor w/ 2 levels &quot;nao&quot;,&quot;sim&quot;: 1 1 1 1 1 1 1 1 1 1 ...
+   - attr(*, &quot;.internal.selfref&quot;)=&lt;externalptr&gt;</code></pre>
+<pre class="r"><code>summary(dt_final)</code></pre>
+<pre><code>        Data             Estacao     TempBulboSeco   TempBulboUmido 
+   Min.   :2010-01-01   83049:2348   Min.   :11.70   Min.   : 9.70  
+   1st Qu.:2011-09-19   83695:2557   1st Qu.:21.47   1st Qu.:18.53  
+   Median :2013-06-14   83698:2557   Median :24.13   Median :20.96  
+   Mean   :2013-06-20   83718:2413   Mean   :24.04   Mean   :20.60  
+   3rd Qu.:2015-03-19   83738:2537   3rd Qu.:26.67   3rd Qu.:22.83  
+   Max.   :2016-12-31   83743:2556   Max.   :36.20   Max.   :28.07  
+   UmidadeRelativa VelocidadeVento   Nebulosidade       Latitude     
+   Min.   :36.67   Min.   :0.0000   Min.   : 0.000   Min.   :-22.89  
+   1st Qu.:67.00   1st Qu.:0.0000   1st Qu.: 2.333   1st Qu.:-22.45  
+   Median :74.00   Median :0.8667   Median : 5.667   Median :-22.02  
+   Mean   :73.76   Mean   :0.8679   Mean   : 5.396   Mean   :-22.11  
+   3rd Qu.:80.67   3rd Qu.:1.3333   3rd Qu.: 8.667   3rd Qu.:-21.74  
+   Max.   :98.67   Max.   :7.6000   Max.   :10.000   Max.   :-21.20  
+     Longitude         n_focos              mes              ano      
+   Min.   :-44.44   Min.   :  0.0000   Min.   : 1.000   Min.   :2010  
+   1st Qu.:-43.41   1st Qu.:  0.0000   1st Qu.: 3.000   1st Qu.:2011  
+   Median :-42.36   Median :  0.0000   Median : 6.000   Median :2013  
+   Mean   :-42.76   Mean   :  0.8537   Mean   : 6.483   Mean   :2013  
+   3rd Qu.:-41.90   3rd Qu.:  0.0000   3rd Qu.: 9.000   3rd Qu.:2015  
+   Max.   :-41.33   Max.   :180.0000   Max.   :12.000   Max.   :2016  
+   incendio   
+   nao:12443  
+   sim: 2525  
+              
+              
+              
+  </code></pre>
 </div>
 </div>
 

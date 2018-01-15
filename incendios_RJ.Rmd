@@ -32,6 +32,8 @@ library(parallel)
 library(doParallel)
 library(DMwR)
 library(ROSE)
+library(pROC)
+library(gbm)
 ```
 
 
@@ -558,7 +560,7 @@ multi_algo_training <- function(models, control = control, treino = treino)
   registerDoParallel(cluster)
   
   # "aquecendo" o algoritmo, caso contrário o primeiro método tem uma performance abaixo do normal
-  warmup <-train(form, treino, "rf", trControl = control)
+  warmup <-train(form, treino, "glm", trControl = control)
   
   # Função para realizar o treinamento dos algoritmos minimizando os erros que possam ser produzidos no processo.
   trainCall <- function(i) 
@@ -576,20 +578,6 @@ multi_algo_training <- function(models, control = control, treino = treino)
   # removendo valores NULL, só nos interessa métodos que funcionaram
   t2 <- t2[!sapply(t2, is.null)]
   
-  # função que extrai os indicadores de performance do algoritmo
-  printCall <- function(i) 
-  {
-    return(tryCatch(
-      {
-        cat(sprintf("%-22s",(models[i])))
-        cat(round(getTrainPerf(t2[[i]])$TrainAccuracy,4),"\t")
-        cat(round(getTrainPerf(t2[[i]])$TrainKappa,4),"\t")
-        cat(t2[[i]]$times$everything[3],"\n")},
-      error=function(e) NULL))
-  }
-  
-  r2 <- lapply(1:length(t2), printCall)
-  
   # fechando o cluster
   stopCluster(cluster); registerDoSEQ();
   
@@ -600,19 +588,28 @@ multi_algo_training <- function(models, control = control, treino = treino)
   x3 <- numeric()   # RMSE
   x4 <- numeric()   # time [s]
   x5 <- character() # long model name
+  x6 <- numeric()   # precision
+  x7 <- numeric()   # recall
   
   # criando os dados de performance
   for (i in 1:length(t2)) {
+    mat_conf <- confusionMatrix(predict(newdata = treino, object = t2[[i]]), 
+                            reference = treino$incendio, 
+                            positive = "sim",
+                            mode = "prec_recall")
     x1[i] <- t2[[i]]$method
-    x2[i] <- as.numeric(round(getTrainPerf(t2[[i]])$TrainAccuracy,4))
-    x3[i] <- as.numeric(round(getTrainPerf(t2[[i]])$TrainKappa,4))
+    x2[i] <- mat_conf$overall["Accuracy"]
+    x3[i] <- mat_conf$overall["Kappa"]
     x4[i] <- as.numeric(t2[[i]]$times$everything[3])
     x5[i] <- t2[[i]]$modelInfo$label
+    x6[i] <- mat_conf$byClass["Precision"]
+    x7[i] <- mat_conf$byClass["Recall"]
   }
   
   # criando o data frame
-  df1 <- data.frame(x1,x2,x3,x4,x5, stringsAsFactors=FALSE)
-  names(df1) <- c("Method", "Accuracy", "Kappa", "Time", "Algo_name")
+  df1 <- data.frame(x1,x2,x3,x4,x5,x6,x7, stringsAsFactors=FALSE)
+  names(df1) <- c("Method", "Accuracy", "Kappa", "Time", "Algo_name", 
+                  "Precision", "Recall")
   return(df1)
 }
 
@@ -636,14 +633,19 @@ summary(primeira_selecao)
 print("Decis do tempo")
 quantile(x = primeira_selecao$Time, probs = c((1:9)/10))
 
-primeira_selecao[primeira_selecao$Time < median(primeira_selecao$Time),]
 ```
 
 Eliminando 50% dos algoritmos
 ```{r Segunda seleção}
-qplot(primeira_selecao[primeira_selecao$Time <= median(primeira_selecao$Time),4]) + ggtitle("Tempo dos algoritmos")
-segunda_selecao <- primeira_selecao[primeira_selecao$Time <= median(primeira_selecao$Time) & 
-                                      primeira_selecao$Accuracy > 0.7, ]
+qplot(primeira_selecao[primeira_selecao$Time <= 4,4]) + ggtitle("Tempo dos algoritmos")
+qplot(primeira_selecao[primeira_selecao$Kappa <= median(primeira_selecao$Kappa),3])
+primeira_selecao[primeira_selecao$Time <= 4 & 
+                   primeira_selecao$Kappa <= .3 &
+                   primeira_selecao$Accuracy >= 0.7,]
+
+segunda_selecao <- primeira_selecao[primeira_selecao$Time <= 4 & 
+                   primeira_selecao$Kappa <= .3 &
+                   primeira_selecao$Accuracy >= 0.7,]
 summary(segunda_selecao)
 
 # Decis da acurácia
@@ -654,20 +656,30 @@ quantile(x = segunda_selecao$Accuracy, probs = c((1:9)/10))
 print("Decis do tempo")
 quantile(x = segunda_selecao$Time, probs = c((1:9)/10))
 
+# Dispersão dos resultados Kappa x tempo
+qplot(y = segunda_selecao$Kappa, x = segunda_selecao$Time)+
+  geom_hline(aes(yintercept = median(segunda_selecao$Kappa), color = "red")) +
+  geom_vline(aes(xintercept = mean(segunda_selecao$Time), color = "red"))
+
 # Dispersão dos resultados Acurácia x tempo
 qplot(y = segunda_selecao$Accuracy, x = segunda_selecao$Time)+
   geom_hline(aes(yintercept = median(segunda_selecao$Accuracy), color = "red")) +
-  geom_vline(aes(xintercept = median(segunda_selecao$Time), color = "red"))
-
+  geom_vline(aes(xintercept = mean(segunda_selecao$Time), color = "red"))
+ 
 ```
 
 Selecionando os algoritmos que performaram acima da mediana da acurácia e abaixo da mediana do tempo.
 ```{r Terceira seleção}
-qplot(segunda_selecao[segunda_selecao$Time < median(segunda_selecao$Time),4]) + ggtitle("Tempo dos algoritmos")
+qplot(segunda_selecao[segunda_selecao$Time < mean(segunda_selecao$Time),4]) + ggtitle("Tempo dos algoritmos")
 terceira_selecao <- segunda_selecao[segunda_selecao$Time < median(segunda_selecao$Time) & 
                                       segunda_selecao$Accuracy > median(segunda_selecao$Accuracy), ]
 summary(terceira_selecao)
+terceira_selecao
 
+qplot(terceira_selecao$Accuracy, terceira_selecao$Kappa)+
+  geom_hline(aes(yintercept = mean(terceira_selecao$Kappa)))
+
+terceira_selecao
 # Decis da acurácia
 print("Decis da Acurácia")
 quantile(x = terceira_selecao$Accuracy, probs = c((1:9)/10))
@@ -679,30 +691,30 @@ quantile(x = terceira_selecao$Time, probs = c((1:9)/10))
 # Dispersão dos resultados Acurácia x tempo
 qplot(y = terceira_selecao$Accuracy, x = terceira_selecao$Time) + 
   geom_hline(aes(yintercept = mean(terceira_selecao$Accuracy)))
-terceira_selecao <- terceira_selecao[-7,]
+
 
 ```
 
-Refinamos até chegar a uma lista de 13 algoritmos rápidos e eficientes.
+Refinamos até chegar a uma lista de 12 algoritmos rápidos e eficientes.
 Vamos testar novamente com o dataset completo desbalanceado para refinar ainda mais a lista.
 
-```{r Segunda análise}
+```{r Segunda análise, eval = F}
 idx <- createDataPartition(dt_final$incendio, p = .75, list = FALSE)
 treino1 <- dt_final[idx,]
 r3 <- multi_algo_training(terceira_selecao$Method, control = control, treino = treino1)
 save(r3, file = "./dados/r3.rds")
+```
+```{r carregando r3, echo = F}
 load("./dados/r3.rds")
+```
+```{r selecao final}
 qplot(r3$Time, r3$Accuracy)
 qplot(r3$Accuracy)
 
-r3[r3$Time < 10,] %>%
-  arrange(desc(Accuracy)) %>%
-  top_n(4)
+r3 %>%
+  arrange(Precision, Recall, desc(Kappa))
 
-selecaofinal <- r3[r3$Time < 10,] %>%
-  arrange(desc(Accuracy)) %>%
-  top_n(4) %>%
-  .$Method
+selecaofinal <-c("lda", "rocc", "rpart2", "knn", "gbm")
 ```
 
 Escolhidos os 4 algoritmos com melhor custo benefício, vamos ao balanceamento das classes.
@@ -720,8 +732,7 @@ No over-sampling selecionamos todas as observações da classe com maior número
 
 Entre Over e Under Sampling existem dois pacotes chamados SMOTE (Synthetic Minority Over-sampling TEchnique) e ROSE (Random Over-Sampling Examples), que trabalham com over e under-sampling ao mesmo tempo.
 
-O pacote caret nos permite utilizar esses métodos de balanceamento diremente no argumento trainControl
-
+O pacote caret nos permite utilizar esses métodos de balanceamento diretamente no argumento trainControl.
 
 Configurando o método de treino do algoritmo, a função utilizará a validação cruzada com kfold = 10 para escolher os melhores parâmetros automaticamente.
 
@@ -730,22 +741,26 @@ control_over <- trainControl(method="cv",
                         number = 10,
                         savePredictions="final", classProbs = T,
                         allowParallel = T,
-                        sampling = "up")
+                        sampling = "up", verboseIter = T,
+                        summaryFunction = twoClassSummary)
 control_under <- trainControl(method="cv",
                         number = 10,
                         savePredictions="final", classProbs = T,
                         allowParallel = T,
-                        sampling = "down")
+                        sampling = "down",
+                        summaryFunction = twoClassSummary)
 control_smote <- trainControl(method="cv",
                         number = 10,
                         savePredictions="final", classProbs = T,
                         allowParallel = T,
-                        sampling = "smote")
+                        sampling = "smote",
+                        summaryFunction = twoClassSummary)
 control_rose <- trainControl(method="cv",
                         number = 10,
                         savePredictions="final", classProbs = T,
                         allowParallel = T,
-                        sampling = "rose")
+                        sampling = "rose",
+                        summaryFunction = twoClassSummary)
 ```
 
 Fórmula a ser utilizada, ou seja, as variáveis preditoras e a variável predita.
@@ -755,35 +770,71 @@ form <- as.formula("incendio ~ Data+TempBulboSeco+TempBulboUmido+
                          Nebulosidade+Latitude+Longitude+mes")
 ```
 
-Foram definidos alguns parâmetros de _tuning_ para o algoritmo, a função _train_ irá tentar ajustar o algoritmo utilizando a métrica "Accuracy", através da validação cruzada com k = 10.
-```{r train, eval=T}
+Utilizaremos os quatro tipos disponíveis de balanceamento de classes disponíveis no pacote caret para selecionarmos o algoritmo que será utilizado para treinamento e qual tipo de balanceamento utilizaremos.
+```{r teste de balanceamento, eval=F}
 idx <- createDataPartition(dt_final$incendio, p = .75, list = FALSE)
 treino1 <- dt_final[idx,]
-metric <- "Accuracy"
 
-over <- multi_algo_training(selecaofinal, control = control_over, treino = treino1)
-under <- multi_algo_training(selecaofinal, control = control_under, treino = treino1)
-smote <- multi_algo_training(selecaofinal, control = control_smote, treino = treino1)
-rose <- multi_algo_training(selecaofinal, control = control_rose, treino = treino1)
-
+over <- cbind(multi_algo_training(selecaofinal, control = control_over, treino = treino1),
+              sampling = "over")
+under <- cbind(multi_algo_training(selecaofinal, control = control_under, treino = treino1),
+              sampling = "under")
+smote <- cbind(multi_algo_training(selecaofinal, control = control_smote, treino = treino1),
+              sampling = "smote")
+rose <- cbind(multi_algo_training(selecaofinal, control = control_rose, treino = treino1),
+              sampling = "rose")
+save(over, under, smote, rose, file = "./dados/balanceamento.RData")
+```
+```{r carregando balanceamento, echo = F}
+load("./dados/balanceamento.RData")
+idx <- createDataPartition(dt_final$incendio, p = .80, list = FALSE)
+treino <- dt_final[idx,]
+teste <- dt_final[-idx,]
+```
+```{r plotando balanceamento}
+rbind(over, under, smote, rose) %>%
+  .[,c(1:3,6:8)] %>%
+  melt(data = ., id.vars = c("sampling", "Method")) %>%
+  ggplot(aes(x = variable, y = value, color = Method), data = .) +
+    geom_point(size = 2) + facet_grid(. ~ sampling) + 
+    theme_grey() + theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 9))
 
 ```
 
-Resultados de diferentes parametrizações:
-```{r sumario do fit, echo=F}
-fit
+Utilizaremos o Algoritmo Stochastic Gradient Boosting para treinar nosso modelo através da função train do pacote caret juntamento com o balanceamento de classes do algoritmo SMOTE.
+```{r treinando algoritmo, eval = F}
+idx <- createDataPartition(dt_final$incendio, p = .80, list = FALSE)
+treino <- dt_final[idx,]
+teste <- dt_final[-idx,]
+control <- trainControl(method="repeatedcv",
+                        number = 10,
+                        repeats = 3,
+                        savePredictions="final", classProbs = T,
+                        allowParallel = T,
+                        sampling = "smote", verboseIter = T,
+                        summaryFunction = twoClassSummary, p= 0.8)
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+fit <- train(form, dt_final, 
+             trControl = control, 
+             method = "gbm", tuneLength = 10)
+stopCluster(cluster)
+registerDoSEQ()
+gc()
 ```
-
+```{r caregando fit, echo = F}
+fit <- readRDS("./dados/fit.rds")
+```
 # __Interpretação e Avaliação__
 
-O seguinte gráfico mostra o a acurácia em relação aos diferentes parâmetros utilizados durante o ajuste.
-```{r plot parâmetros modelo}
-plot(fit)
+O seguinte gráfico mostra o a Curva ROC em relação aos diferentes parâmetros utilizados durante o ajuste.
+```{r plot parâmetros modelo, message=F, warnings = F}
+ggplot(fit)
 ```
 
 Gráfico mostrando a importância de cada variável para a predição.
 ```{r importância das variáveis}
-ggplot(varImp(fit)) + theme_minimal()
+ggplot(varImp(fit))
 ```
 
 A partir desse modelo final vamos testar com o dataset "teste" que foi separado no início da análise.
@@ -798,20 +849,19 @@ mat_conf
 
 De acordo com a matriz de confusão:
 
-- O algoritmo teve uma acurácia de 85,09%, isto é, acertou 85% das previsões no geral;
-- 54,39% de sensibilidade; classificou como "sim" 54,39% dos eventos que realmente eram "sim";
-- 76,29% de precisão; 76,29% dos eventos classificados como "sim", realmente eram "sim"
-- 94,7% de especificidade; classificou como "nao" 94,7% dos eventos que realmente eram "nao";
-
-Essa diferença se deve ao fato das classes estarem desbalanceadas no dataset original, esse desbalanceamento é medido pela prevalência, que representa a proporção do valor positivo, no caso "sim", em relação à quantidade valores negativos, "nao". Para o nosso dataset de teste a prevalência está em 23,86%.
+- O algoritmo teve uma acurácia de 86,7%, isto é, acertou 86,7% das previsões no geral;
+- 58,99% de precisão; 58,99% dos eventos classificados como "sim" realmente eram "sim";
+- 69,50% de cobertura; 69,50% dos eventos que realmente eram "sim" foram classificados como "sim".
 
 Outro ponto a ser observado é que a maior parte das predições errôneas ocorreram em estações do centro-oeste e norte do país, e que a quantidade de estações nessas áres é relativamente baixa em relação a outras áreas do país.
 ```{r mapa desempenho por estacao, options}
+data <- subset(cbind(teste, pred)[,acerto := ifelse(incendio==pred, "sim", "nao")], acerto == "sim")
 figure2+ 
-      geom_count(data = cbind(teste, pred)[,acerto := ifelse(incendio==pred, "sim", "nao")], 
-       aes(x=Longitude, y=Latitude, color = acerto, size = ..prop..), show.legend = T) + 
-      scale_size_area(max_size = 5) + theme_bw() +
-      scale_color_brewer(type = "div",direction = 1, palette = "Spectral")
+      geom_density2d(data = data, aes(x = Longitude, y = Latitude), size = 0.01) + 
+      stat_density2d(data = data, aes(x = Longitude, y = Latitude, fill = ..level.., alpha = ..level..), 
+                     size = 0.01, bins =16, geom = "polygon") + 
+      scale_fill_gradientn(colors = heat.colors(16), guide = FALSE) + 
+      scale_alpha(range = c(0.1, 0.8), guide = FALSE)
 
 data.table(cbind(teste, pred)[,acerto := ifelse(incendio==pred, "sim", "nao")])
 

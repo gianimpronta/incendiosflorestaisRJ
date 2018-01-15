@@ -17,7 +17,9 @@ detachAllPackages()
 # 1) load caret packages from BioConductor, answer 'n' for updates
 source("http://bioconductor.org/biocLite.R")
 biocLite()
+n
 biocLite(c("arm", "gpls", "logicFS", "vbmp"))
+n
 
 # 2) installs most of the 340 caret dependencies + seven commonly used ones
 mCom <- c("caret", "AppliedPredictiveModeling", "ggplot2", 
@@ -39,5 +41,7 @@ install.packages(c("CHAID"), repos="http://R-Forge.R-project.org")
 # All packages that are not in CRAN such as SDDA need to be installed by hand
 source("http://bioconductor.org/biocLite.R")
 biocLite()
+a
 biocLite(c("gpls", "logicFS", "vbmp"))
+a
 ### END

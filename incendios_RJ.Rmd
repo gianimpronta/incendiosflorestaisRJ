@@ -26,6 +26,10 @@ library(rattle)
 library(caret)
 library(maps)
 library(mapdata)
+library(caretEnsemble)
+library(DT)
+library(parallel)
+library(doParallel)
 ```
 
 
@@ -354,7 +358,7 @@ Localização das estações meteorológicas
 estacoes = unique(meteo_rj[,c(1, 9, 10)])
 figure2 <- ggmap(get_map( location = BB, source = "stamen",  maptype = "toner-lite") ) 
 figure2 + 
-  geom_point(data = estacoes, aes(x= Longitude, y = Latitude), color = "red", size = 2, alpha = 0.6) +
+  geom_point(data = estacoes, aes(x= Longitude, y = Latitude), color = "red", size = 4, alpha = 0.6) +
   geom_label(data = estacoes, aes(label = paste("Estação", Estacao), x = Longitude, y = Latitude), 
              nudge_x = -0.2, nudge_y = 0.1, size = 3)
 ```
@@ -504,10 +508,185 @@ str(dt_final)
 summary(dt_final)
 ```
 
-A coluna incendio será a nossa coluna alvo. Desde já, podemos percerber que as classes da nossa coluna alvo está desbalanceada o que poderá interferir na mineração de dados. 
+# Mineração de dados
 
-Desse medo, iremos criar um novo dataset com as classes balanceadas.
-```{r Balanceamento de classes}
+## Escolha do algoritmo
+
+Para escolhermos o melhor algoritmo a ser utilizado, devemos levar em conta a acurácia do modelo e o tempo necessário para o seu treinamento, pois conforme novas observações forem sendo obtidas e a massa de dados for crescendo o tempo necessário para o treinamento do modelo poderá se tornar algo inexequível e pouco prático. 
+
+Desse modo, utilizaremos o pacote CARET ( __C__ lassification __A__ nd __RE__ gression __T__ raining) para testar todos os métodos de classificação disponíveis no pacote. 
+
+Primeiramente utilizaremos uma versão reduzida do dataset para selecionarmos os algoritmos com base no tempo necessário de treinamento, como o objetivo neste momento é a escolha do algoritmo, utilizaremos uma a versão com classes desbalanceadas mesmo.
+
+```{r Escolha de algoritmo tempo, eval = FALSE}
+# Procedimento baseado no script criado por Tobias Kind , disponível em seu github https://github.com/tobigithub/caret-machine-learning
+# Criando versão menor do dataset desbalanceado
+idx <- sample(nrow(dt_final), 1000)
+treino <- dt_final[idx,]
+
+# utilizando a validação cruzada kfold = 10
+control <- trainControl(method="cv",
+                        number = 10,
+                        savePredictions="final", 
+                        verboseIter = T,
+                        allowParallel = T)
+
+# seleção dos preditores
+form <- as.formula("incendio ~ Data+TempBulboSeco+TempBulboUmido+
+                   UmidadeRelativa+VelocidadeVento+
+                   Nebulosidade+Latitude+Longitude+mes")
+
+# Selecionando todos os métodos de classificação do pacote caret
+m <- unique(modelLookup()[modelLookup()$forClas,c(1)])
+
+multi_algo_training <- function(models)
+{
+  # algoritmos que são muito lentos
+  removeModels <- c("AdaBag", "AdaBoost.M1", "FH.GBML", "pda2", "PenalizedLDA",
+                    "GFS.GCCL", "rbf", "RFlda", "nodeHarvest", "ORFsvm", "dwdLinear", "dwdPoly", "gam",
+                    "gaussprLinear", "ownn", "sddaLDA", "sddaQDA", "SLAVE", "smda", "snn", "rmda", 
+                    "rFerns", "wsrf","ordinalNet","awnb", "awtan","manb","nbDiscrete","nbSearch","tan",
+                    "tanSearch","bartMachine","randomGLM", "Rborist", "adaboost")
+  
+  # removendo os algoritmos lentos da lista
+  models <- models[!models %in% removeModels]
+
+  # iniciando cluster para a computação paralela
+  cluster <- makePSOCKcluster(detectCores() - 1)
+  registerDoParallel(cluster)
+  
+  # "aquecendo" o algoritmo, caso contrário o primeiro método tem uma performance abaixo do normal
+  warmup <-train(form, treino, "rf", trControl = control)
+  
+  # Função para realizar o treinamento dos algoritmos minimizando os erros que possam ser produzidos no processo.
+  trainCall <- function(i) 
+  {
+    cat("----------------------------------------------------","\n");
+    set.seed(123); cat(i," <- loaded\n");
+    return(tryCatch(
+      t2 <- train(form, treino, (i), trControl = control, metric = "Accuracy"),
+      error=function(e) NULL))
+  }
+  
+  # Usando lapply pra rodar tudo para que a função try/catch funcione
+  t2 <- lapply(models, trainCall)
+  
+  # removendo valores NULL, só nos interessa métodos que funcionaram
+  t2 <- t2[!sapply(t2, is.null)]
+  
+  # função que extrai os indicadores de performance do algoritmo
+  printCall <- function(i) 
+  {
+    return(tryCatch(
+      {
+        cat(sprintf("%-22s",(models[i])))
+        cat(round(getTrainPerf(t2[[i]])$TrainAccuracy,4),"\t")
+        cat(round(getTrainPerf(t2[[i]])$TrainKappa,4),"\t")
+        cat(t2[[i]]$times$everything[3],"\n")},
+      error=function(e) NULL))
+  }
+  
+  r2 <- lapply(1:length(t2), printCall)
+  
+  # fechando o cluster
+  stopCluster(cluster); registerDoSEQ();
+  
+  # pré alocando os tipos de dados
+  i = 1; MAX = length(t2);
+  x1 <- character() # Name
+  x2 <- numeric()   # R2
+  x3 <- numeric()   # RMSE
+  x4 <- numeric()   # time [s]
+  x5 <- character() # long model name
+  
+  # criando os dados de performance
+  for (i in 1:length(t2)) {
+    x1[i] <- t2[[i]]$method
+    x2[i] <- as.numeric(round(getTrainPerf(t2[[i]])$TrainAccuracy,4))
+    x3[i] <- as.numeric(round(getTrainPerf(t2[[i]])$TrainKappa,4))
+    x4[i] <- as.numeric(t2[[i]]$times$everything[3])
+    x5[i] <- t2[[i]]$modelInfo$label
+  }
+  
+  # criando o data frame
+  df1 <- data.frame(x1,x2,x3,x4,x5, stringsAsFactors=FALSE)
+  names(df1) <- c("Method", "Accuracy", "Kappa", "Time", "Algo_name")
+  return(df1)
+}
+
+# pré-carregando todos os pacotes necessários
+suppressPackageStartupMessages(ll <-lapply(m, require, character.only = TRUE))
+
+primeira_selecao <- multi_algo_training(m)
+```
+```{r , echo = FALSE}
+load("./dados/primeira_selecao.rds")
+```
+
+Analisando os resultados iniciais
+```{r }
+qplot(primeira_selecao$Time) + ggtitle("Tempo dos algoritmos")
+summary(primeira_selecao)
+# Decis do tempo
+print("Decis do tempo")
+quantile(x = primeira_selecao$Time, probs = c((1:9)/10))
+```
+
+Eliminando 20% dos algoritmos
+```{r }
+qplot(primeira_selecao[primeira_selecao$Time < 20,4]) + ggtitle("Tempo dos algoritmos")
+segunda_selecao <- primeira_selecao[primeira_selecao$Time < 20 & 
+                                      primeira_selecao$Accuracy > 0.7, ]
+summary(segunda_selecao)
+
+# Decis da acurácia
+print("Decis da Acurácia")
+quantile(x = segunda_selecao$Accuracy, probs = c((1:9)/10))
+
+# Decis do tempo
+print("Decis do tempo")
+quantile(x = segunda_selecao$Time, probs = c((1:9)/10))
+
+# Dispersão dos resultados Acurácia x tempo
+qplot(y = segunda_selecao$Accuracy, x = segunda_selecao$Time)
+```
+
+
+```{r Terceira sele;ão}
+qplot(segunda_selecao[segunda_selecao$Time < 5,4]) + ggtitle("Tempo dos algoritmos")
+terceira_selecao <- segunda_selecao[segunda_selecao$Time < 2 & 
+                                      segunda_selecao$Accuracy > 0.8, ]
+summary(terceira_selecao)
+
+# Decis da acurácia
+print("Decis da Acurácia")
+quantile(x = terceira_selecao$Accuracy, probs = c((1:9)/10))
+
+# Decis do tempo
+print("Decis do tempo")
+quantile(x = terceira_selecao$Time, probs = c((1:9)/10))
+
+# Dispersão dos resultados Acurácia x tempo
+qplot(y = terceira_selecao$Accuracy, x = terceira_selecao$Time)
+selecaofinal <- terceira_selecao[terceira_selecao$Accuracy > 0.82,]
+nrow(selecaofinal)
+```
+
+Conseguimos refinar até uma lista de 43 algoritmos rápidos e eficientes, aagora vamos testar novamente com o datas e desbalanceado para reformar ainda mais a lista.
+
+```{r Segundo teste}
+r3 <- multi_algo_training(selecaofinal$Method)
+```
+
+
+## Balanceamento das classes
+
+A coluna incendio será a nossa coluna alvo. Desde já, podemos percerber que as classes da nossa coluna alvo está desbalanceada o que poderá interferir na mineração de dados, pois criará um viés  a favor da classe que possui mais observações.
+
+Desse modo, podemos empregar técnicas para balanceamento de classes, como over-sampling e under-sampling. 
+
+No under-sampling selecionamos todas as observações da classe com menor número de observações e selecionamos aleatoriamente uma quantidade igual das observações da outra classe. O problema
+```{r under-sampling}
 n_sim <- table(dt_final$incendio)[2]
 idx_nao <- which(dt_final$incendio == "nao")
 idx_sim <- which(dt_final$incendio == "sim")
@@ -516,7 +695,6 @@ dt_nao <- dt_final[idx]
 dt_sim <- dt_final[idx_sim]
 dt_balanceado <- rbind(dt_sim, dt_nao)
 ```
-# Mineração de dados
 
 Separando em dois datasets, um para treino e outro para testes
 ```{r Sampling}
@@ -574,7 +752,8 @@ A partir desse modelo final vamos testar com o dataset "teste" que foi separado 
 ```{r Matriz confusão, options}
 pred <- predict(fit, teste)
 mat_conf <- confusionMatrix(pred, reference = teste$incendio, 
-                             positive = "sim")
+                            positive = "sim",
+                            mode = "prec_recall")
 mat_conf
 ```
 

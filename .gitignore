@@ -2,3 +2,7 @@
 .Rhistory
 .RData
 .Ruserdata
+badhess.txt
+t2.Rds
+df1.Rds
+incendios_RJ_cache/*

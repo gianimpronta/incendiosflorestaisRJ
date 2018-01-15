@@ -30,6 +30,8 @@ library(caretEnsemble)
 library(DT)
 library(parallel)
 library(doParallel)
+library(DMwR)
+library(ROSE)
 ```
 
 
@@ -539,7 +541,7 @@ form <- as.formula("incendio ~ Data+TempBulboSeco+TempBulboUmido+
 # Selecionando todos os métodos de classificação do pacote caret
 m <- unique(modelLookup()[modelLookup()$forClas,c(1)])
 
-multi_algo_training <- function(models)
+multi_algo_training <- function(models, control = control, treino = treino)
 {
   # algoritmos que são muito lentos
   removeModels <- c("AdaBag", "AdaBoost.M1", "FH.GBML", "pda2", "PenalizedLDA",
@@ -619,23 +621,28 @@ suppressPackageStartupMessages(ll <-lapply(m, require, character.only = TRUE))
 
 primeira_selecao <- multi_algo_training(m)
 ```
-```{r , echo = FALSE}
+```{r Carregando primeira selecao, echo = FALSE}
 load("./dados/primeira_selecao.rds")
 ```
 
 Analisando os resultados iniciais
-```{r }
-qplot(primeira_selecao$Time) + ggtitle("Tempo dos algoritmos")
+```{r Primeira analise}
+qplot(primeira_selecao$Time) + 
+  ggtitle("Tempo dos algoritmos") +
+  geom_vline(aes(xintercept = median(primeira_selecao$Time)))
 summary(primeira_selecao)
+
 # Decis do tempo
 print("Decis do tempo")
 quantile(x = primeira_selecao$Time, probs = c((1:9)/10))
+
+primeira_selecao[primeira_selecao$Time < median(primeira_selecao$Time),]
 ```
 
-Eliminando 20% dos algoritmos
-```{r }
-qplot(primeira_selecao[primeira_selecao$Time < 20,4]) + ggtitle("Tempo dos algoritmos")
-segunda_selecao <- primeira_selecao[primeira_selecao$Time < 20 & 
+Eliminando 50% dos algoritmos
+```{r Segunda seleção}
+qplot(primeira_selecao[primeira_selecao$Time <= median(primeira_selecao$Time),4]) + ggtitle("Tempo dos algoritmos")
+segunda_selecao <- primeira_selecao[primeira_selecao$Time <= median(primeira_selecao$Time) & 
                                       primeira_selecao$Accuracy > 0.7, ]
 summary(segunda_selecao)
 
@@ -648,14 +655,17 @@ print("Decis do tempo")
 quantile(x = segunda_selecao$Time, probs = c((1:9)/10))
 
 # Dispersão dos resultados Acurácia x tempo
-qplot(y = segunda_selecao$Accuracy, x = segunda_selecao$Time)
+qplot(y = segunda_selecao$Accuracy, x = segunda_selecao$Time)+
+  geom_hline(aes(yintercept = median(segunda_selecao$Accuracy), color = "red")) +
+  geom_vline(aes(xintercept = median(segunda_selecao$Time), color = "red"))
+
 ```
 
-
-```{r Terceira sele;ão}
-qplot(segunda_selecao[segunda_selecao$Time < 5,4]) + ggtitle("Tempo dos algoritmos")
-terceira_selecao <- segunda_selecao[segunda_selecao$Time < 2 & 
-                                      segunda_selecao$Accuracy > 0.8, ]
+Selecionando os algoritmos que performaram acima da mediana da acurácia e abaixo da mediana do tempo.
+```{r Terceira seleção}
+qplot(segunda_selecao[segunda_selecao$Time < median(segunda_selecao$Time),4]) + ggtitle("Tempo dos algoritmos")
+terceira_selecao <- segunda_selecao[segunda_selecao$Time < median(segunda_selecao$Time) & 
+                                      segunda_selecao$Accuracy > median(segunda_selecao$Accuracy), ]
 summary(terceira_selecao)
 
 # Decis da acurácia
@@ -667,16 +677,35 @@ print("Decis do tempo")
 quantile(x = terceira_selecao$Time, probs = c((1:9)/10))
 
 # Dispersão dos resultados Acurácia x tempo
-qplot(y = terceira_selecao$Accuracy, x = terceira_selecao$Time)
-selecaofinal <- terceira_selecao[terceira_selecao$Accuracy > 0.82,]
-nrow(selecaofinal)
+qplot(y = terceira_selecao$Accuracy, x = terceira_selecao$Time) + 
+  geom_hline(aes(yintercept = mean(terceira_selecao$Accuracy)))
+terceira_selecao <- terceira_selecao[-7,]
+
 ```
 
-Conseguimos refinar até uma lista de 43 algoritmos rápidos e eficientes, aagora vamos testar novamente com o datas e desbalanceado para reformar ainda mais a lista.
+Refinamos até chegar a uma lista de 13 algoritmos rápidos e eficientes.
+Vamos testar novamente com o dataset completo desbalanceado para refinar ainda mais a lista.
 
-```{r Segundo teste}
-r3 <- multi_algo_training(selecaofinal$Method)
+```{r Segunda análise}
+idx <- createDataPartition(dt_final$incendio, p = .75, list = FALSE)
+treino1 <- dt_final[idx,]
+r3 <- multi_algo_training(terceira_selecao$Method, control = control, treino = treino1)
+save(r3, file = "./dados/r3.rds")
+load("./dados/r3.rds")
+qplot(r3$Time, r3$Accuracy)
+qplot(r3$Accuracy)
+
+r3[r3$Time < 10,] %>%
+  arrange(desc(Accuracy)) %>%
+  top_n(4)
+
+selecaofinal <- r3[r3$Time < 10,] %>%
+  arrange(desc(Accuracy)) %>%
+  top_n(4) %>%
+  .$Method
 ```
+
+Escolhidos os 4 algoritmos com melhor custo benefício, vamos ao balanceamento das classes.
 
 
 ## Balanceamento das classes
@@ -685,32 +714,41 @@ A coluna incendio será a nossa coluna alvo. Desde já, podemos percerber que as
 
 Desse modo, podemos empregar técnicas para balanceamento de classes, como over-sampling e under-sampling. 
 
-No under-sampling selecionamos todas as observações da classe com menor número de observações e selecionamos aleatoriamente uma quantidade igual das observações da outra classe. O problema
-```{r under-sampling}
-n_sim <- table(dt_final$incendio)[2]
-idx_nao <- which(dt_final$incendio == "nao")
-idx_sim <- which(dt_final$incendio == "sim")
-idx <- idx_nao[sample(length(idx_nao), n_sim)]
-dt_nao <- dt_final[idx]
-dt_sim <- dt_final[idx_sim]
-dt_balanceado <- rbind(dt_sim, dt_nao)
-```
+No under-sampling selecionamos todas as observações da classe com menor número de observações e selecionamos aleatoriamente uma quantidade igual de observações da outra classe. O problema é que nesse caso podemos perder muita informação da outra classe.
 
-Separando em dois datasets, um para treino e outro para testes
-```{r Sampling}
-idx <- createDataPartition(dt_balanceado$incendio, p = .75, list = FALSE)
-treino <- dt_balanceado[idx,]
-teste <- dt_balanceado[-idx,]
-```
+No over-sampling selecionamos todas as observações da classe com maior número de observações e selecionamos aleatoriamente uma quantidade igual de observações da outra classe. O problema é que nesse caso podemos gerar um viés para a classe que tinha menor quantidade de observações no início.
+
+Entre Over e Under Sampling existem dois pacotes chamados SMOTE (Synthetic Minority Over-sampling TEchnique) e ROSE (Random Over-Sampling Examples), que trabalham com over e under-sampling ao mesmo tempo.
+
+O pacote caret nos permite utilizar esses métodos de balanceamento diremente no argumento trainControl
+
 
 Configurando o método de treino do algoritmo, a função utilizará a validação cruzada com kfold = 10 para escolher os melhores parâmetros automaticamente.
+
 ```{r train control}
-control <- trainControl(method="cv",
+control_over <- trainControl(method="cv",
                         number = 10,
-                        savePredictions="final", classProbs = T)
+                        savePredictions="final", classProbs = T,
+                        allowParallel = T,
+                        sampling = "up")
+control_under <- trainControl(method="cv",
+                        number = 10,
+                        savePredictions="final", classProbs = T,
+                        allowParallel = T,
+                        sampling = "down")
+control_smote <- trainControl(method="cv",
+                        number = 10,
+                        savePredictions="final", classProbs = T,
+                        allowParallel = T,
+                        sampling = "smote")
+control_rose <- trainControl(method="cv",
+                        number = 10,
+                        savePredictions="final", classProbs = T,
+                        allowParallel = T,
+                        sampling = "rose")
 ```
 
-Fórmula a ser utilizada, ou seja as variáveis preditoras e a variável predita.
+Fórmula a ser utilizada, ou seja, as variáveis preditoras e a variável predita.
 ```{r formula}
 form <- as.formula("incendio ~ Data+TempBulboSeco+TempBulboUmido+
                          UmidadeRelativa+VelocidadeVento+
@@ -719,15 +757,16 @@ form <- as.formula("incendio ~ Data+TempBulboSeco+TempBulboUmido+
 
 Foram definidos alguns parâmetros de _tuning_ para o algoritmo, a função _train_ irá tentar ajustar o algoritmo utilizando a métrica "Accuracy", através da validação cruzada com k = 10.
 ```{r train, eval=T}
-set.seed(1869)
+idx <- createDataPartition(dt_final$incendio, p = .75, list = FALSE)
+treino1 <- dt_final[idx,]
 metric <- "Accuracy"
-tuning <-  expand.grid(interaction.depth = c(3, 6, 9),
-                          n.trees = c(100, 250), 
-                          shrinkage = .1,
-                          n.minobsinnode = c(10, 20, 30))
-fit <- train(form, data = treino,
-                 trControl = control, method = "rf", 
-                 metric = metric)
+
+over <- multi_algo_training(selecaofinal, control = control_over, treino = treino1)
+under <- multi_algo_training(selecaofinal, control = control_under, treino = treino1)
+smote <- multi_algo_training(selecaofinal, control = control_smote, treino = treino1)
+rose <- multi_algo_training(selecaofinal, control = control_rose, treino = treino1)
+
+
 ```
 
 Resultados de diferentes parametrizações:
